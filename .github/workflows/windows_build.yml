@@ -51,12 +51,23 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy,rustfmt
 
-      - name: Setup LLVM
+      - name: Setup LLVM (primary)
+        id: llvm
         uses: KyleMayes/install-llvm-action@v2
+        continue-on-error: true
         with:
-          version: ${{ env.LLVM_VERSION }}
+          version: "15.0.7"          # ok with the Windows build
           directory: C:\llvm
-
+      - name: Fallback: install LLVM via Chocolatey
+        if: steps.llvm.outcome != 'success'
+        shell: pwsh
+        run: |
+          choco install -y llvm --version=15.0.7
+          # Wire PATH for this job
+          echo "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          # Some scripts look for C:\llvm; create a junction for compatibility
+          if (!(Test-Path 'C:\llvm')) { New-Item -ItemType Junction -Path 'C:\llvm' -Target "$env:ProgramFiles\LLVM" | Out-Null }
+          clang --version
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
