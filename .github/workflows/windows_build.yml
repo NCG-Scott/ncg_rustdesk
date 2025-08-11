@@ -11,7 +11,7 @@ on:
     branches: [ master ]
     paths:
       - ".github/workflows/windows_build.yml"
-      - "force-run.txt"   # touch this file to trigger a build
+      - "force-run.txt"
 
 permissions:
   contents: write
@@ -39,6 +39,7 @@ jobs:
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
     env:
+      # job-level defaults (used by all steps)
       VCPKG_ROOT: ${{ github.workspace }}\res\vcpkg
       VCPKG_DEFAULT_TRIPLET: x64-windows
     steps:
@@ -88,12 +89,16 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Make sure env vars are exported for all later steps
+          echo "VCPKG_ROOT=$env:GITHUB_WORKSPACE\res\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Append
+
           cd "$env:GITHUB_WORKSPACE\res\vcpkg"
           if (!(Test-Path .\vcpkg.exe)) {
             .\bootstrap-vcpkg.bat -disableMetrics
           }
           .\vcpkg.exe version
-          .\vcpkg.exe install opus:${env:VCPKG_DEFAULT_TRIPLET} --clean-after-build
+          .\vcpkg.exe install opus:$env:VCPKG_DEFAULT_TRIPLET --clean-after-build
 
       - name: Enable long paths
         run: git config --system core.longpaths true
@@ -101,7 +106,15 @@ jobs:
 
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
+        env:
+          # ensure python/cargo definitely inherit these
+          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
+          VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_DEFAULT_TRIPLET }}
         run: |
+          $env:VCPKG_ROOT = "$env:GITHUB_WORKSPACE\res\vcpkg"
+          $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
+          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
+          Get-ChildItem "$env:VCPKG_ROOT\installed" -ErrorAction SilentlyContinue | Format-List | Out-Host
           python --version
           python build.py --flutter
 
