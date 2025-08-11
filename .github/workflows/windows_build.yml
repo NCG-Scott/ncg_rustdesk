@@ -44,7 +44,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # Bake in your server defaults
+      # Point submodule to YOUR fork/branch so defaults are baked in
       - name: Use NCG hbb_common defaults
         shell: bash
         run: |
@@ -82,37 +82,51 @@ jobs:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- vcpkg in repo root + required ports (manifest is at vcpkg.json)
-      - name: Bootstrap vcpkg and install ports
-        shell: pwsh
-        run: |
-          $root = Join-Path $pwd.Path 'vcpkg'
-          if (!(Test-Path $root)) {
-            git clone --depth 1 https://github.com/microsoft/vcpkg $root
-          }
-          & "$root\bootstrap-vcpkg.bat" -disableMetrics
-          # Export env for ALL subsequent steps (incl. cargo build scripts)
-          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # Install the four deps RustDesk expects on Windows
-          & "$root\vcpkg.exe" install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static --clean-after-build
-          # (Optional) make it also visible at C:\vcpkg if anything hardcodes it
-          if (!(Test-Path 'C:\vcpkg')) {
-            New-Item -ItemType Junction -Path 'C:\vcpkg' -Target $root | Out-Null
-          }
-          & "$root\vcpkg.exe" version
-          & "$root\vcpkg.exe" integrate install
-
       - name: Enable long paths
         run: git config --system core.longpaths true
         shell: pwsh
 
-      - name: Build Windows (Flutter + Rust)
+      # >>> vcpkg bootstrap + ports (required for magnum-opus / opus)
+      - name: Bootstrap vcpkg and install ports
         shell: pwsh
         run: |
-          Write-Host "VCPKG_ROOT = $env:VCPKG_ROOT"
-          Write-Host "VCPKG_DEFAULT_TRIPLET = $env:VCPKG_DEFAULT_TRIPLET"
-          if (!(Test-Path $env:VCPKG_ROOT)) { throw "VCPKG_ROOT not found at $env:VCPKG_ROOT" }
+          $Vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
+          if (!(Test-Path $Vcpkg)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg $Vcpkg
+          }
+          Push-Location $Vcpkg
+          .\bootstrap-vcpkg.bat
+          .\vcpkg.exe version
+          # Install the exact ports RustDesk expects on Windows (static triplet)
+          .\vcpkg.exe install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+          Pop-Location
+          # Make VCPKG_ROOT available to later steps too
+          "VCPKG_ROOT=$Vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # Optional: belt-and-suspenders so cargo definitely sees env
+      - name: Ensure cargo sees VCPKG_ROOT
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .cargo | Out-Null
+          $cfg = @"
+[env]
+VCPKG_ROOT = "${{ github.workspace }}\vcpkg"
+VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
+"@
+          $cfg | Out-File .cargo\config.toml -Encoding UTF8
+          Get-Content .cargo\config.toml
+
+      - name: Build Windows (Flutter + Rust)
+        shell: pwsh
+        env:
+          # Critical envs for bindgen + magnum-opus
+          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
+          LIBCLANG_PATH: C:\llvm\bin
+        run: |
+          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
+          Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows-static\include" | Select-Object -First 3
           python --version
           python build.py --flutter
 
@@ -137,3 +151,4 @@ jobs:
           tag_name: ${{ github.event.inputs.tag }}
           files: Out\*
           prerelease: false
+
