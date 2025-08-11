@@ -8,6 +8,8 @@ on:
         required: false
         default: ""
 
+permissions:
+  contents: write
 env:
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
@@ -79,10 +81,10 @@ jobs:
         shell: pwsh
 
       - name: Build Windows (Flutter + Rust)
-        shell: bash
+        shell: pwsh
         run: |
-          rustup target add x86_64-pc-windows-msvc
-          python3 build.py --platform windows --flutter
+          python --version
+          python build.py --flutter
 
       - name: Build MSI
         shell: pwsh
