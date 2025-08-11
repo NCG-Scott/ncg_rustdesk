@@ -38,10 +38,6 @@ jobs:
     name: x86_64-pc-windows-msvc
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: windows-2022
-    env:
-      # job-level defaults (used by all steps)
-      VCPKG_ROOT: ${{ github.workspace }}\res\vcpkg
-      VCPKG_DEFAULT_TRIPLET: x64-windows
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,20 +81,31 @@ jobs:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      - name: Bootstrap vcpkg and install opus
+      # ---- vcpkg: make sure *every* child process sees VCPKG_ROOT ----
+      - name: Bootstrap vcpkg and install opus (Windows)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Make sure env vars are exported for all later steps
-          echo "VCPKG_ROOT=$env:GITHUB_WORKSPACE\res\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $root = "$env:GITHUB_WORKSPACE\res\vcpkg"
 
-          cd "$env:GITHUB_WORKSPACE\res\vcpkg"
+          if (!(Test-Path $root)) { throw "vcpkg folder missing: $root" }
+          if (!(Test-Path 'C:\vcpkg')) {
+            New-Item -ItemType Junction -Path 'C:\vcpkg' -Target $root | Out-Null
+          }
+
+          cd $root
           if (!(Test-Path .\vcpkg.exe)) {
             .\bootstrap-vcpkg.bat -disableMetrics
           }
           .\vcpkg.exe version
-          .\vcpkg.exe install opus:$env:VCPKG_DEFAULT_TRIPLET --clean-after-build
+          .\vcpkg.exe install opus:x64-windows --clean-after-build
+
+          # Export for later steps in this job
+          echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Also set for *new child processes* started by Python/cargo
+          setx VCPKG_ROOT C:\vcpkg
+          setx VCPKG_DEFAULT_TRIPLET x64-windows
 
       - name: Enable long paths
         run: git config --system core.longpaths true
@@ -106,15 +113,9 @@ jobs:
 
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
-        env:
-          # ensure python/cargo definitely inherit these
-          VCPKG_ROOT: ${{ env.VCPKG_ROOT }}
-          VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_DEFAULT_TRIPLET }}
         run: |
-          $env:VCPKG_ROOT = "$env:GITHUB_WORKSPACE\res\vcpkg"
-          $env:VCPKG_DEFAULT_TRIPLET = "x64-windows"
-          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          Get-ChildItem "$env:VCPKG_ROOT\installed" -ErrorAction SilentlyContinue | Format-List | Out-Host
+          Write-Host "VCPKG_ROOT (current proc) = $env:VCPKG_ROOT"
+          if (!(Test-Path $env:VCPKG_ROOT)) { Write-Error "VCPKG_ROOT path not found" }
           python --version
           python build.py --flutter
 
