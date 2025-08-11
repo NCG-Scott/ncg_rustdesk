@@ -7,9 +7,15 @@ on:
         description: "Release tag (e.g. v1.4.1-ncg1). Leave blank to skip release."
         required: false
         default: ""
+  push:
+    branches: [ master ]
+    paths:
+      - ".github/workflows/windows_build.yml"
+      - "force-run.txt"   # touch this file to trigger a build
 
 permissions:
   contents: write
+
 env:
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
@@ -38,7 +44,6 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # Point submodule to YOUR fork/branch so defaults are baked in
       - name: Use NCG hbb_common defaults
         shell: bash
         run: |
@@ -58,18 +63,18 @@ jobs:
         uses: KyleMayes/install-llvm-action@v2
         continue-on-error: true
         with:
-          version: "15.0.7"          # ok with the Windows build
+          version: "15.0.7"
           directory: C:\llvm
+
       - name: Fallback: install LLVM via Chocolatey
         if: steps.llvm.outcome != 'success'
         shell: pwsh
         run: |
           choco install -y llvm --version=15.0.7
-          # Wire PATH for this job
           echo "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
-          # Some scripts look for C:\llvm; create a junction for compatibility
           if (!(Test-Path 'C:\llvm')) { New-Item -ItemType Junction -Path 'C:\llvm' -Target "$env:ProgramFiles\LLVM" | Out-Null }
           clang --version
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
