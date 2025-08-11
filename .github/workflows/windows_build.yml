@@ -66,14 +66,15 @@ jobs:
           version: "15.0.7"
           directory: C:\llvm
 
-      - name: Fallback: install LLVM via Chocolatey
-        if: steps.llvm.outcome != 'success'
+      - name: "Fallback: install LLVM via Chocolatey"
+        if: ${{ steps.llvm.outcome != 'success' }}
         shell: pwsh
         run: |
           choco install -y llvm --version=15.0.7
           echo "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
           if (!(Test-Path 'C:\llvm')) { New-Item -ItemType Junction -Path 'C:\llvm' -Target "$env:ProgramFiles\LLVM" | Out-Null }
           clang --version
+
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
