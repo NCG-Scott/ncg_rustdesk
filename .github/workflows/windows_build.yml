@@ -81,18 +81,16 @@ jobs:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # ---- vcpkg: make sure *every* child process sees VCPKG_ROOT ----
-      - name: Bootstrap vcpkg and install opus (Windows)
+      # --- vcpkg: ensure it's in a stable, global-ish path and install opus
+      - name: Bootstrap vcpkg and install opus
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = "$env:GITHUB_WORKSPACE\res\vcpkg"
-
           if (!(Test-Path $root)) { throw "vcpkg folder missing: $root" }
           if (!(Test-Path 'C:\vcpkg')) {
             New-Item -ItemType Junction -Path 'C:\vcpkg' -Target $root | Out-Null
           }
-
           cd $root
           if (!(Test-Path .\vcpkg.exe)) {
             .\bootstrap-vcpkg.bat -disableMetrics
@@ -100,12 +98,17 @@ jobs:
           .\vcpkg.exe version
           .\vcpkg.exe install opus:x64-windows --clean-after-build
 
-          # Export for later steps in this job
-          echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # Also set for *new child processes* started by Python/cargo
-          setx VCPKG_ROOT C:\vcpkg
-          setx VCPKG_DEFAULT_TRIPLET x64-windows
+      # --- Force Cargo build scripts to see VCPKG_ROOT
+      - name: Write Cargo env config for build scripts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .cargo | Out-Null
+          @"
+[env]
+VCPKG_ROOT = "C:\\vcpkg"
+VCPKG_DEFAULT_TRIPLET = "x64-windows"
+"@ | Set-Content -Path .cargo\config.toml -Encoding UTF8
+          Get-Content .cargo\config.toml
 
       - name: Enable long paths
         run: git config --system core.longpaths true
@@ -113,8 +116,11 @@ jobs:
 
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
+        env:
+          VCPKG_ROOT: C:\vcpkg
+          VCPKG_DEFAULT_TRIPLET: x64-windows
         run: |
-          Write-Host "VCPKG_ROOT (current proc) = $env:VCPKG_ROOT"
+          Write-Host "VCPKG_ROOT (env for this step) = $env:VCPKG_ROOT"
           if (!(Test-Path $env:VCPKG_ROOT)) { Write-Error "VCPKG_ROOT path not found" }
           python --version
           python build.py --flutter
