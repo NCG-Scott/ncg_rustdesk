@@ -1,0 +1,96 @@
+name: Windows x64 Build (NCG defaults)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.4.1-ncg1). Leave blank to skip release."
+        required: false
+        default: ""
+
+env:
+  RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
+  FLUTTER_VERSION: "3.24.5"
+
+jobs:
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  build-RustDeskTempTopMostWindow:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  windows-x64:
+    name: x86_64-pc-windows-msvc
+    needs: [build-RustDeskTempTopMostWindow, generate-bridge]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # Point submodule to YOUR fork/branch so defaults are baked in
+      - name: Use NCG hbb_common defaults
+        shell: bash
+        run: |
+          git -C libs/hbb_common remote set-url origin https://github.com/NCG-Scott/hbb_common.git
+          git -C libs/hbb_common fetch origin ncg-defaults
+          git -C libs/hbb_common checkout ncg-defaults
+          echo "hbb_common commit: $(git -C libs/hbb_common rev-parse --short HEAD)"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy,rustfmt
+
+      - name: Setup LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+          directory: C:\llvm
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      - name: Enable long paths
+        run: git config --system core.longpaths true
+        shell: pwsh
+
+      - name: Build Windows (Flutter + Rust)
+        shell: bash
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          python3 build.py --platform windows --flutter
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          msbuild .\res\msi\Package\Package.wixproj /p:Configuration=Release /p:Platform=x64
+          New-Item -ItemType Directory -Force -Path .\Out | Out-Null
+          Get-ChildItem res\msi\Package\bin\Release\*.msi | Copy-Item -Destination .\Out\
+          if (Test-Path .\rustdesk-*.exe) { Copy-Item .\rustdesk-*.exe .\Out\ }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-x64
+          path: Out\*
+
+      - name: Create release (optional)
+        if: ${{ github.event.inputs.tag != '' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: Out\*
+          prerelease: false
