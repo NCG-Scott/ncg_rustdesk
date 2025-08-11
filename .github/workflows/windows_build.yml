@@ -44,6 +44,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # Bake in your server defaults
       - name: Use NCG hbb_common defaults
         shell: bash
         run: |
@@ -66,8 +67,8 @@ jobs:
           version: "15.0.7"
           directory: C:\llvm
 
-      - name: "Fallback: install LLVM via Chocolatey"
-        if: ${{ steps.llvm.outcome != 'success' }}
+      - name: Fallback: install LLVM via Chocolatey
+        if: steps.llvm.outcome != 'success'
         shell: pwsh
         run: |
           choco install -y llvm --version=15.0.7
@@ -81,34 +82,26 @@ jobs:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- vcpkg: ensure it's in a stable, global-ish path and install opus
-      - name: Bootstrap vcpkg and install opus
+      # --- vcpkg in repo root + required ports (manifest is at vcpkg.json)
+      - name: Bootstrap vcpkg and install ports
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $root = "$env:GITHUB_WORKSPACE\res\vcpkg"
-          if (!(Test-Path $root)) { throw "vcpkg folder missing: $root" }
+          $root = Join-Path $pwd.Path 'vcpkg'
+          if (!(Test-Path $root)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg $root
+          }
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          # Export env for ALL subsequent steps (incl. cargo build scripts)
+          "VCPKG_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Install the four deps RustDesk expects on Windows
+          & "$root\vcpkg.exe" install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static --clean-after-build
+          # (Optional) make it also visible at C:\vcpkg if anything hardcodes it
           if (!(Test-Path 'C:\vcpkg')) {
             New-Item -ItemType Junction -Path 'C:\vcpkg' -Target $root | Out-Null
           }
-          cd $root
-          if (!(Test-Path .\vcpkg.exe)) {
-            .\bootstrap-vcpkg.bat -disableMetrics
-          }
-          .\vcpkg.exe version
-          .\vcpkg.exe install opus:x64-windows --clean-after-build
-
-      # --- Force Cargo build scripts to see VCPKG_ROOT
-      - name: Write Cargo env config for build scripts
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path .cargo | Out-Null
-          @"
-[env]
-VCPKG_ROOT = "C:\\vcpkg"
-VCPKG_DEFAULT_TRIPLET = "x64-windows"
-"@ | Set-Content -Path .cargo\config.toml -Encoding UTF8
-          Get-Content .cargo\config.toml
+          & "$root\vcpkg.exe" version
+          & "$root\vcpkg.exe" integrate install
 
       - name: Enable long paths
         run: git config --system core.longpaths true
@@ -116,12 +109,10 @@ VCPKG_DEFAULT_TRIPLET = "x64-windows"
 
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
-        env:
-          VCPKG_ROOT: C:\vcpkg
-          VCPKG_DEFAULT_TRIPLET: x64-windows
         run: |
-          Write-Host "VCPKG_ROOT (env for this step) = $env:VCPKG_ROOT"
-          if (!(Test-Path $env:VCPKG_ROOT)) { Write-Error "VCPKG_ROOT path not found" }
+          Write-Host "VCPKG_ROOT = $env:VCPKG_ROOT"
+          Write-Host "VCPKG_DEFAULT_TRIPLET = $env:VCPKG_DEFAULT_TRIPLET"
+          if (!(Test-Path $env:VCPKG_ROOT)) { throw "VCPKG_ROOT not found at $env:VCPKG_ROOT" }
           python --version
           python build.py --flutter
 
