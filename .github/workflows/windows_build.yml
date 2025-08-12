@@ -20,6 +20,9 @@ env:
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
+  # Use the same approach as upstream CI for stable vcpkg behavior & caching
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836"  # current used upstream
 
 jobs:
   generate-bridge:
@@ -44,7 +47,6 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # Point submodule to YOUR fork/branch so defaults are baked in
       - name: Use NCG hbb_common defaults
         shell: bash
         run: |
@@ -86,47 +88,54 @@ jobs:
         run: git config --system core.longpaths true
         shell: pwsh
 
-      # >>> vcpkg bootstrap + ports (required for magnum-opus / opus)
-      - name: Bootstrap vcpkg and install ports
-        shell: pwsh
-        run: |
-          $Vcpkg = Join-Path $env:GITHUB_WORKSPACE 'vcpkg'
-          if (!(Test-Path $Vcpkg)) {
-            git clone --depth 1 https://github.com/microsoft/vcpkg $Vcpkg
-          }
-          Push-Location $Vcpkg
-          .\bootstrap-vcpkg.bat
-          .\vcpkg.exe version
-          # Install the exact ports RustDesk expects on Windows (static triplet)
-          .\vcpkg.exe install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-          Pop-Location
-          # Make VCPKG_ROOT available to later steps too
-          "VCPKG_ROOT=$Vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+      # --- vcpkg: exact action RustDesk uses in their CI ---
+      - name: Setup vcpkg with GitHub Actions cache
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
 
-      # Optional: belt-and-suspenders so cargo definitely sees env
-      - name: Ensure cargo sees VCPKG_ROOT
+      # Install the ports RustDesk needs on Windows (manifest-free, explicit)
+      - name: Install vcpkg ports (static triplet)
+        shell: bash
+        env:
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
+        run: |
+          set -e
+          "$VCPKG_ROOT/vcpkg" install \
+            libvpx:x64-windows-static \
+            libyuv:x64-windows-static \
+            opus:x64-windows-static \
+            aom:x64-windows-static
+
+      # Belt & suspenders: also clue Cargo about VCPKG in .cargo/config.toml
+      - name: Ensure Cargo sees VCPKG env
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force .cargo | Out-Null
-          $cfg = @"
+          @"
 [env]
-VCPKG_ROOT = "${{ github.workspace }}\vcpkg"
+VCPKG_ROOT = "C:\\vcpkg"
 VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
-"@
-          $cfg | Out-File .cargo\config.toml -Encoding UTF8
+"@ | Out-File .cargo\config.toml -Encoding UTF8
           Get-Content .cargo\config.toml
 
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
         env:
-          # Critical envs for bindgen + magnum-opus
-          VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+          # **Critical**: make these visible to python→cargo→build.rs
+          VCPKG_ROOT: C:\vcpkg
           VCPKG_DEFAULT_TRIPLET: x64-windows-static
           LIBCLANG_PATH: C:\llvm\bin
+          RUST_BACKTRACE: 1
         run: |
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows-static\include" | Select-Object -First 3
+          if (Test-Path "$env:VCPKG_ROOT\installed\x64-windows-static\include") {
+            Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows-static\include" | Select-Object -First 5
+          } else {
+            Write-Error "vcpkg headers missing — install step failed"
+          }
           python --version
           python build.py --flutter
 
@@ -151,4 +160,3 @@ VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
           tag_name: ${{ github.event.inputs.tag }}
           files: Out\*
           prerelease: false
-
