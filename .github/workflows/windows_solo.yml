@@ -22,8 +22,14 @@ env:
   FLUTTER_VERSION: "3.24.5"
 
 jobs:
+  # 1) Generate Flutter <-> Rust bridge files (re-uses your repo's bridge.yml)
+  generate-bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  # 2) Build Windows after bridge generation completes
   windows-x64:
     name: x86_64-pc-windows-msvc (solo)
+    needs: [generate-bridge]
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -31,14 +37,14 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # --- Rust toolchain
+      # Rust toolchain
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy,rustfmt
 
-      # --- LLVM / libclang for bindgen
+      # LLVM / libclang for bindgen
       - name: Setup LLVM (primary)
         id: llvm
         uses: KyleMayes/install-llvm-action@v2
@@ -65,14 +71,14 @@ jobs:
           "LIBCLANG_PATH=$p" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "LIBCLANG_PATH=$p"
 
-      # --- Flutter SDK
+      # Flutter SDK
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # --- vcpkg (clone, bootstrap, install ports, set env)
+      # vcpkg (clone, bootstrap, install ports, set env for build.rs)
       - name: Setup vcpkg and install ports
         shell: pwsh
         run: |
@@ -86,7 +92,7 @@ jobs:
           "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
           "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # --- Also tell Cargo build scripts (so build.rs sees it)
+      # Also tell Cargo build scripts
       - name: Ensure Cargo sees VCPKG env
         shell: pwsh
         run: |
@@ -99,7 +105,7 @@ jobs:
         shell: pwsh
         run: git config --system core.longpaths true
 
-      # --- Build Windows app (prints VCPKG vars so we can verify)
+      # Build Windows app (now that bridge files exist)
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
         env:
@@ -117,7 +123,7 @@ jobs:
           python --version
           python build.py --flutter
 
-      # --- Package MSI & upload
+      # Package MSI & upload
       - name: Build MSI
         shell: pwsh
         run: |
