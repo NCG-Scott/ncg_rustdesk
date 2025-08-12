@@ -1,4 +1,4 @@
- name: Windows x64 Build (NCG defaults - Solo)
+name: Windows x64 Build (NCG defaults - Solo)
 
 on:
   workflow_dispatch:
@@ -18,12 +18,12 @@ permissions:
 
 env:
   RUST_VERSION: "1.75"
-  LLVM_VERSION: "15.0.6"
+  LLVM_VERSION: "15.0.7"
   FLUTTER_VERSION: "3.24.5"
 
 jobs:
   windows-x64:
-    name: x86_64-pc-windows-msvc
+    name: x86_64-pc-windows-msvc (solo)
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -31,12 +31,14 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # --- Rust toolchain
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy,rustfmt
 
+      # --- LLVM / libclang for bindgen
       - name: Setup LLVM (primary)
         id: llvm
         uses: KyleMayes/install-llvm-action@v2
@@ -54,15 +56,37 @@ jobs:
           if (!(Test-Path 'C:\llvm')) { New-Item -ItemType Junction -Path 'C:\llvm' -Target "$env:ProgramFiles\LLVM" | Out-Null }
           clang --version
 
-      - name: Setup vcpkg
+      - name: Export LIBCLANG_PATH
         shell: pwsh
         run: |
-          git clone https://github.com/microsoft/vcpkg C:\vcpkg
-          cd C:\vcpkg
-          .\bootstrap-vcpkg.bat
-          echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          echo "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+          $p = "C:\llvm\bin"
+          if (-not (Test-Path $p)) { $p = "$env:ProgramFiles\LLVM\bin" }
+          if (-not (Test-Path $p)) { throw "libclang (LLVM bin) not found" }
+          "LIBCLANG_PATH=$p" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "LIBCLANG_PATH=$p"
 
+      # --- Flutter SDK
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+
+      # --- vcpkg (clone, bootstrap, install ports, set env)
+      - name: Setup vcpkg and install ports
+        shell: pwsh
+        run: |
+          if (!(Test-Path C:\vcpkg)) {
+            git clone --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
+          }
+          cd C:\vcpkg
+          .\bootstrap-vcpkg.bat -disableMetrics
+          .\vcpkg.exe version
+          .\vcpkg.exe install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+          "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # --- Also tell Cargo build scripts (so build.rs sees it)
       - name: Ensure Cargo sees VCPKG env
         shell: pwsh
         run: |
@@ -71,22 +95,29 @@ jobs:
           Set-Content -Path .cargo\config.toml -Value $cfg -Encoding UTF8
           Get-Content .cargo\config.toml
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-
       - name: Enable long paths
-        run: git config --system core.longpaths true
         shell: pwsh
+        run: git config --system core.longpaths true
 
+      # --- Build Windows app (prints VCPKG vars so we can verify)
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
+        env:
+          VCPKG_ROOT: C:\vcpkg
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
+          LIBCLANG_PATH: ${{ env.LIBCLANG_PATH }}
+          RUST_BACKTRACE: 1
         run: |
+          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
+          Write-Host "VCPKG_DEFAULT_TRIPLET=$env:VCPKG_DEFAULT_TRIPLET"
+          if (!(Test-Path "$env:VCPKG_ROOT\installed\x64-windows-static\include")) {
+            throw "vcpkg includes are missing; vcpkg install step failed"
+          }
+          Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows-static\include" | Select-Object -First 5 | Format-List | Out-Host
           python --version
           python build.py --flutter
 
+      # --- Package MSI & upload
       - name: Build MSI
         shell: pwsh
         run: |
@@ -100,12 +131,3 @@ jobs:
         with:
           name: rustdesk-windows-x64
           path: Out\*
-
-      - name: Create release (optional)
-        if: ${{ github.event.inputs.tag != '' }}
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ github.event.inputs.tag }}
-          files: Out\*
-          prerelease: false
-       
