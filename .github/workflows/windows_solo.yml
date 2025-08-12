@@ -19,14 +19,15 @@ permissions:
 env:
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.7"
-  FLUTTER_VERSION: "3.24.5"
+  # IMPORTANT: match the bridge job's Flutter version to avoid FRB ABI/API drift
+  FLUTTER_VERSION: "3.22.3"
 
 jobs:
-  # 1) Generate Flutter <-> Rust bridge files (re-uses your repo's bridge.yml)
+  # 1) Generate Flutter<->Rust bridge (your existing reusable workflow)
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
 
-  # 2) Build Windows after bridge generation completes
+  # 2) Build Windows after bridge is generated
   windows-x64:
     name: x86_64-pc-windows-msvc (solo)
     needs: [generate-bridge]
@@ -36,6 +37,19 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
+
+      # Pull in bridge files produced by the generate-bridge job
+      - name: Download bridge artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: .
+      - name: Verify bridge files exist
+        shell: pwsh
+        run: |
+          dir src
+          if (!(Test-Path "src\bridge_generated.rs")) { throw "bridge_generated.rs missing after download." }
+          if (!(Test-Path "flutter\lib\generated_bridge.dart")) { throw "generated_bridge.dart missing after download." }
 
       # Rust toolchain
       - name: Setup Rust
@@ -71,14 +85,14 @@ jobs:
           "LIBCLANG_PATH=$p" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "LIBCLANG_PATH=$p"
 
-      # Flutter SDK
+      # Flutter SDK (match bridge job)
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # vcpkg (clone, bootstrap, install ports, set env for build.rs)
+      # vcpkg: install codecs RustDesk expects (static)
       - name: Setup vcpkg and install ports
         shell: pwsh
         run: |
@@ -105,7 +119,7 @@ jobs:
         shell: pwsh
         run: git config --system core.longpaths true
 
-      # Build Windows app (now that bridge files exist)
+      # Build Windows app
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
         env:
