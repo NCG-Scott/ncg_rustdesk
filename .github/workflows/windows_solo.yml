@@ -1,7 +1,12 @@
-name: Windows x64 Solo (debug VCPKG_ROOT)
+ name: Windows x64 Build (NCG defaults - Solo)
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.4.1-ncg1). Leave blank to skip release."
+        required: false
+        default: ""
   push:
     branches: [ master ]
     paths:
@@ -13,11 +18,12 @@ permissions:
 
 env:
   RUST_VERSION: "1.75"
+  LLVM_VERSION: "15.0.6"
   FLUTTER_VERSION: "3.24.5"
 
 jobs:
   windows-x64:
-    name: x86_64-pc-windows-msvc (solo)
+    name: x86_64-pc-windows-msvc
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -25,109 +31,62 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # Pull in your baked-in defaults
-      - name: Use NCG hbb_common defaults
-        shell: bash
-        run: |
-          git -C libs/hbb_common remote set-url origin https://github.com/NCG-Scott/hbb_common.git
-          git -C libs/hbb_common fetch origin ncg-defaults
-          git -C libs/hbb_common checkout ncg-defaults
-          echo "hbb_common commit: $(git -C libs/hbb_common rev-parse --short HEAD)"
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: clippy,rustfmt
 
-      # LLVM for bindgen (libclang)
-      - name: Setup LLVM primary
+      - name: Setup LLVM (primary)
         id: llvm
         uses: KyleMayes/install-llvm-action@v2
         continue-on-error: true
         with:
-          version: "15.0.7"
+          version: ${{ env.LLVM_VERSION }}
           directory: C:\llvm
 
       - name: "Fallback: install LLVM via Chocolatey"
         if: ${{ steps.llvm.outcome != 'success' }}
         shell: pwsh
         run: |
-          choco install -y llvm --version=15.0.7
+          choco install -y llvm --version=${{ env.LLVM_VERSION }}
           echo "$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          if (!(Test-Path 'C:\llvm')) { New-Item -ItemType Junction -Path 'C:\llvm' -Target "$env:ProgramFiles\LLVM" | Out-Null }
+          clang --version
 
-      # Compute LIBCLANG_PATH and export for later steps
-      - name: Export LIBCLANG_PATH
+      - name: Setup vcpkg
         shell: pwsh
         run: |
-          $p = "C:\llvm\bin"
-          if (-not (Test-Path $p)) { $p = "$env:ProgramFiles\LLVM\bin" }
-          if (-not (Test-Path $p)) { throw "libclang (LLVM bin) not found" }
-          "LIBCLANG_PATH=$p" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "LIBCLANG_PATH=$p"
+          git clone https://github.com/microsoft/vcpkg C:\vcpkg
+          cd C:\vcpkg
+          .\bootstrap-vcpkg.bat
+          echo "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          echo "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      # Flutter SDK
+      - name: Ensure Cargo sees VCPKG env
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force .cargo | Out-Null
+          $cfg = "[env]`r`nVCPKG_ROOT = `"C:\\vcpkg`"`r`nVCPKG_DEFAULT_TRIPLET = `"x64-windows-static`"`r`n"
+          Set-Content -Path .cargo\config.toml -Value $cfg -Encoding UTF8
+          Get-Content .cargo\config.toml
+
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           flutter-version: ${{ env.FLUTTER_VERSION }}
 
-      # vcpkg (action manages caching + sets VCPKG_ROOT)
-      - name: Setup vcpkg
-        id: vcpkg
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: C:\vcpkg
-          doNotCache: false
-
-      # Install the exact Windows ports RustDesk expects (static)
-      - name: Install vcpkg ports
-        shell: pwsh
-        env:
-          VCPKG_DEFAULT_TRIPLET: x64-windows-static
-        run: |
-          & "C:\vcpkg\vcpkg.exe" version
-          & "C:\vcpkg\vcpkg.exe" install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-
-          # Export env for all later steps (magnum-opus build.rs needs VCPKG_ROOT)
-          "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "VCPKG_DEFAULT_TRIPLET=x64-windows-static" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      # Also tell cargo build scripts via .cargo/config.toml
-      - name: Ensure Cargo sees VCPKG env
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force .cargo | Out-Null
-          @"
-[env]
-VCPKG_ROOT = "C:\\vcpkg"
-VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
-"@ | Set-Content -Path .cargo\config.toml -Encoding UTF8
-          Get-Content .cargo\config.toml
-
       - name: Enable long paths
         run: git config --system core.longpaths true
         shell: pwsh
 
-      # Build the Windows app
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
-        env:
-          VCPKG_ROOT: C:\vcpkg
-          VCPKG_DEFAULT_TRIPLET: x64-windows-static
-          LIBCLANG_PATH: ${{ env.LIBCLANG_PATH }}
-          RUST_BACKTRACE: 1
         run: |
-          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
-          if (!(Test-Path "$env:VCPKG_ROOT\installed\x64-windows-static\include")) {
-            throw "vcpkg includes are missing; vcpkg install step failed"
-          }
-          Get-ChildItem "$env:VCPKG_ROOT\installed\x64-windows-static\include" | Select-Object -First 5 | Format-List | Out-Host
           python --version
           python build.py --flutter
 
-      # Package MSI & upload
       - name: Build MSI
         shell: pwsh
         run: |
@@ -141,3 +100,12 @@ VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
         with:
           name: rustdesk-windows-x64
           path: Out\*
+
+      - name: Create release (optional)
+        if: ${{ github.event.inputs.tag != '' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          files: Out\*
+          prerelease: false
+       
