@@ -19,7 +19,7 @@ permissions:
 env:
   RUST_VERSION: "1.75"
   LLVM_VERSION: "15.0.7"
-  # IMPORTANT: match the bridge job's Flutter version to avoid FRB ABI/API drift
+  # Match bridge job's Flutter to avoid FRB/API drift
   FLUTTER_VERSION: "3.22.3"
 
 jobs:
@@ -119,6 +119,16 @@ jobs:
         shell: pwsh
         run: git config --system core.longpaths true
 
+      # PATCH: keep extended_text compatible with Dart 3.4.x (Flutter 3.22.x)
+      - name: Patch extended_text to 13.0.0 and pub get
+        shell: pwsh
+        run: |
+          $pubspec = "flutter\pubspec.yaml"
+          if (!(Test-Path $pubspec)) { throw "pubspec.yaml not found at $pubspec" }
+          (Get-Content $pubspec) -replace 'extended_text:\s*14\.0\.0','extended_text: 13.0.0' |
+            Set-Content $pubspec -Encoding UTF8
+          flutter pub get
+
       # Build Windows app
       - name: Build Windows (Flutter + Rust)
         shell: pwsh
@@ -151,3 +161,4 @@ jobs:
         with:
           name: rustdesk-windows-x64
           path: Out\*
+
